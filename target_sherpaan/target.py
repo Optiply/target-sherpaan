@@ -4,16 +4,18 @@ from __future__ import annotations
 
 from typing import List
 
-from singer_sdk import Target
 from singer_sdk import typing as th
 
 from target_sherpaan import sinks
+from target_hotglue.target import TargetHotglue
 
 
-class TargetSherpaan(Target):
+class TargetSherpaan(TargetHotglue):
     """Target for Sherpaan PurchaseOrders."""
 
     name = "target-sherpaan"
+    # Register available sinks for TargetHotglue SDK (mirrors pattern in other targets)
+    SINK_TYPES = [sinks.PurchaseOrderSink]
 
     config_jsonschema = th.PropertiesList(
         th.Property(
@@ -55,4 +57,4 @@ class TargetSherpaan(Target):
 
 if __name__ == "__main__":
     TargetSherpaan.cli()
-
+    
