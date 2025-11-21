@@ -28,7 +28,6 @@ class TargetSherpaan(TargetHotglue):
             "security_code",
             th.StringType,
             required=True,
-            secret=True,
             description="Security code for authentication",
         ),
         th.Property(
@@ -57,4 +56,3 @@ class TargetSherpaan(TargetHotglue):
 
 if __name__ == "__main__":
     TargetSherpaan.cli()
-    
