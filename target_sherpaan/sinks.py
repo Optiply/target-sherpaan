@@ -17,7 +17,7 @@ from target_sherpaan.auth import SherpaAuth
 class PurchaseOrderSink(Sink):
     """Sink for PurchaseOrders."""
 
-    name = "purchase_orders"
+    name = "BuyOrders"
     schema = th.PropertiesList(
         th.Property("supplier_remoteId", th.StringType, required=True),
         th.Property("id", th.StringType, required=True),
