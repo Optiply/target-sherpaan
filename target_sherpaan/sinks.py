@@ -2,19 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional
+from xml.sax.saxutils import escape
 
-from singer_sdk import Sink
 from singer_sdk import typing as th
+from target_hotglue.client import HotglueSink
 
 from target_sherpaan.client import SherpaClient
 from target_sherpaan.auth import SherpaAuth
 
 
-class PurchaseOrderSink(Sink):
+class PurchaseOrderSink(HotglueSink):
     """Sink for PurchaseOrders."""
 
     # Stream name must match the incoming Singer stream, which is "BuyOrders"
@@ -23,7 +25,7 @@ class PurchaseOrderSink(Sink):
     schema = th.PropertiesList(
         th.Property("supplier_remoteId", th.StringType, required=True),
         th.Property("id", th.StringType, required=True),
-        th.Property("warehouse_code", th.StringType, required=True),
+        th.Property("warehouse_code", th.StringType, required=False),
         th.Property("created_at", th.StringType),
         th.Property("transaction_date", th.StringType),
         th.Property("externalid", th.StringType),
@@ -48,6 +50,59 @@ class PurchaseOrderSink(Sink):
         self.client = SherpaClient(auth, timeout=timeout)
         self.logger = logging.getLogger(__name__)
 
+    def preprocess_record(self, record: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Preprocess record before upserting.
+        
+        Args:
+            record: Record to preprocess
+            context: Optional context dictionary
+            
+        Returns:
+            Preprocessed record
+        """
+        return record
+
+    def _format_expected_date(self, created_at: Optional[str]) -> str:
+        """Format date to YYYY-MM-DDTHH:MM:SS.000 format (no timezone).
+        
+        Args:
+            created_at: ISO date string or None
+            
+        Returns:
+            Formatted date string
+        """
+        if created_at:
+            try:
+                if isinstance(created_at, str):
+                    # Handle ISO format with microseconds and timezone
+                    pattern = r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d+)([+-]\d{2}:\d{2}|Z)?'
+                    match = re.match(pattern, created_at)
+                    if match:
+                        base_time = match.group(1)
+                        microseconds = match.group(2)
+                        timezone = match.group(3) or ""
+                        fractional = microseconds[:3].ljust(3, "0")
+                        date_str = f"{base_time}.{fractional}{timezone}".replace("Z", "+00:00")
+                    else:
+                        date_str = created_at.replace("Z", "+00:00")
+                    
+                    dt = datetime.fromisoformat(date_str)
+                    if dt.tzinfo is not None:
+                        dt = dt.replace(tzinfo=None)
+                    return dt.strftime("%Y-%m-%dT%H:%M:%S.000")
+                elif isinstance(created_at, datetime):
+                    dt = created_at
+                    if dt.tzinfo is not None:
+                        dt = dt.replace(tzinfo=None)
+                    return dt.strftime("%Y-%m-%dT%H:%M:%S.000")
+                else:
+                    return str(created_at)
+            except Exception as e:
+                self.logger.warning(f"Failed to parse created_at date '{created_at}': {e}, using default")
+        
+        # Default to 30 days from now
+        return (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000")
+
     def _build_add_ordered_purchase_envelope(
         self,
         supplier_code: str,
@@ -69,10 +124,10 @@ class PurchaseOrderSink(Sink):
 <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
   <soap12:Body>
     <AddOrderedPurchase xmlns="http://sherpa.sherpaan.nl/">
-      <securityCode>{security_code}</securityCode>
-      <supplierCode>{supplier_code}</supplierCode>
-      <reference>{reference}</reference>
-      <warehouseCode>{warehouse_code}</warehouseCode>
+      <securityCode>{escape(str(security_code))}</securityCode>
+      <supplierCode>{escape(str(supplier_code))}</supplierCode>
+      <reference>{escape(str(reference))}</reference>
+      <warehouseCode>{escape(str(warehouse_code))}</warehouseCode>
     </AddOrderedPurchase>
   </soap12:Body>
 </soap12:Envelope>"""
@@ -95,59 +150,19 @@ class PurchaseOrderSink(Sink):
         """
         security_code = self.config["security_code"]
         
-        # Format expected date from order-level created_at
-        if created_at:
-            try:
-                if isinstance(created_at, str):
-                    # Handle ISO format with microseconds and timezone
-                    # Example: "2025-11-28T00:00:00.000000Z"
-                    # Remove extra microseconds, keep only 3 digits after decimal point
-                    # Pattern: YYYY-MM-DDTHH:MM:SS.XXXXXX+HH:MM or -HH:MM or Z
-                    pattern = r'(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d+)([+-]\d{2}:\d{2}|Z)?'
-                    match = re.match(pattern, created_at)
-                    if match:
-                        base_time = match.group(1)
-                        microseconds = match.group(2)
-                        timezone = match.group(3) or ""
-                        # Keep only first 3 digits of microseconds
-                        fractional = microseconds[:3].ljust(3, "0")
-                        date_str = f"{base_time}.{fractional}{timezone}".replace("Z", "+00:00")
-                    else:
-                        # No microseconds, just replace Z
-                        date_str = created_at.replace("Z", "+00:00")
-                    
-                    # Parse the date
-                    dt = datetime.fromisoformat(date_str)
-                    formatted_date = dt.strftime("%Y-%m-%dT%H:%M:%S.000")
-                else:
-                    formatted_date = created_at
-            except Exception as e:
-                self.logger.warning(f"Failed to parse created_at date '{created_at}': {e}, using default")
-                # Default to 30 days from now
-                formatted_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000")
-        else:
-            # Default to 30 days from now
-            formatted_date = (datetime.now() + timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%S.000")
+        # Format expected date: YYYY-MM-DDTHH:MM:SS.000 (no timezone, 3 digits for milliseconds)
+        formatted_date = self._format_expected_date(created_at)
         
-        # Build purchase lines XML
-        # Map input fields to SOAP fields for each line item:
-        # Input field "product_remoteId" -> SOAP field "ItemCode"
-        # Input field "supplier_item_code" -> SOAP field "SupplierItemCode" (defaults to ItemCode if not provided)
-        # Input field "quantity" -> SOAP field "QuantityOrdered"
-        # Input field "created_at" (from order level) -> SOAP field "ExpectedDate" (for all lines)
         purchase_lines_xml = ""
         for line in line_items:
-            # Extract from input: line["product_remoteId"] -> use as SOAP ItemCode
             item_code_for_soap = line.get("product_remoteId", "")
-            # Extract from input: line["supplier_item_code"] -> use as SOAP SupplierItemCode (or default to ItemCode)
             supplier_item_code_for_soap = line.get("supplier_item_code", item_code_for_soap)
-            # Extract from input: line["quantity"] -> use as SOAP QuantityOrdered
             quantity_ordered_for_soap = line.get("quantity", 0)
             
             purchase_lines_xml += f"""      <ChangePurchaseLine>
-        <ItemCode>{item_code_for_soap}</ItemCode>
-        <SupplierItemCode>{supplier_item_code_for_soap}</SupplierItemCode>
-        <QuantityOrdered>{quantity_ordered_for_soap}</QuantityOrdered>
+        <ItemCode>{escape(str(item_code_for_soap))}</ItemCode>
+        <SupplierItemCode>{escape(str(supplier_item_code_for_soap))}</SupplierItemCode>
+        <QuantityOrdered>{escape(str(quantity_ordered_for_soap))}</QuantityOrdered>
         <ExpectedDate>{formatted_date}</ExpectedDate>
       </ChangePurchaseLine>
 """
@@ -156,8 +171,8 @@ class PurchaseOrderSink(Sink):
 <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
   <soap12:Body>
     <ChangePurchase2 xmlns="http://sherpa.sherpaan.nl/">
-      <securityCode>{security_code}</securityCode>
-      <purchaseOrderNumber>{purchase_order_number}</purchaseOrderNumber>
+      <securityCode>{escape(str(security_code))}</securityCode>
+      <purchaseOrderNumber>{escape(str(purchase_order_number))}</purchaseOrderNumber>
       <purchaseLines>
 {purchase_lines_xml}      </purchaseLines>
     </ChangePurchase2>
@@ -203,37 +218,52 @@ class PurchaseOrderSink(Sink):
 
         return None
 
-    def process_record(self, record: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> None:
-        """Process a single record.
+    def upsert_record(self, record: Dict[str, Any], context: Optional[Dict[str, Any]] = None):
+        """Process a single record and return metrics for hotglue SDK.
 
         Args:
             record: Record to process
             context: Optional context dictionary
+
+        Returns:
+            Tuple of (id, status, state_updates) for metrics tracking
         """
+        status = True
+        state_updates = dict()
+        purchase_order_number = None
+
         try:
-            # Step 1: Create the purchase order with AddOrderedPurchase
-            # Extract and map input fields to SOAP field values:
-            # Input field "supplier_remoteId" -> SOAP field "supplierCode"
             supplier_code_for_soap = record["supplier_remoteId"]
-            # Input field "id" -> SOAP field "reference"
-            reference_for_soap = record["id"]
-            # Input field "warehouse_code" -> SOAP field "warehouseCode"
-            warehouse_code_for_soap = record["warehouse_code"]
-            line_items = record.get("line_items", [])
+            reference_for_soap = str(record["id"])
+            warehouse_code_for_soap = record.get("warehouse_code") or self.config.get("export_buyOrder_warehouse")
+            if not warehouse_code_for_soap:
+                raise ValueError("warehouse_code is required but not found in record or config (export_buyOrder_warehouse)")
+            
+            # Parse line_items if it's a JSON string
+            line_items_raw = record.get("line_items", [])
+            if isinstance(line_items_raw, str):
+                try:
+                    line_items = json.loads(line_items_raw)
+                except json.JSONDecodeError as e:
+                    self.logger.error(f"Failed to parse line_items JSON string: {e}")
+                    raise ValueError(f"Invalid JSON in line_items: {e}")
+            else:
+                line_items = line_items_raw if isinstance(line_items_raw, list) else []
+            
             created_at = record.get("created_at")
 
             if not line_items:
                 self.logger.warning(f"No line items found for order id {reference_for_soap}, skipping")
-                return
+                state_updates["success"] = False
+                status = False
+                return None, status, state_updates
 
             self.logger.info(f"Creating purchase order with id: {reference_for_soap}")
 
-            # Build and send AddOrderedPurchase request
-            # Pass the mapped values to build the SOAP envelope
             add_envelope = self._build_add_ordered_purchase_envelope(
-                supplier_code=supplier_code_for_soap,  # From record["supplier_remoteId"]
-                reference=reference_for_soap,  # From record["id"]
-                warehouse_code=warehouse_code_for_soap  # From record["warehouse_code"]
+                supplier_code=supplier_code_for_soap,
+                reference=reference_for_soap,
+                warehouse_code=warehouse_code_for_soap
             )
 
             add_response = self.client.call_soap_service(
@@ -248,15 +278,11 @@ class PurchaseOrderSink(Sink):
                 self.logger.error(
                     f"Failed to extract purchase order number from response: {add_response}"
                 )
-                raise ValueError("Could not extract purchase order number from AddOrderedPurchase response")
+                state_updates["success"] = False
+                status = False
+                return None, status, state_updates
 
             self.logger.info(f"Created purchase order {purchase_order_number} for order id {reference_for_soap}")
-
-            # Step 2: Add purchase lines with ChangePurchase2
-            # Input fields will be mapped in _build_change_purchase2_envelope:
-            # product_remoteId -> ItemCode
-            # quantity -> QuantityOrdered
-            # created_at -> ExpectedDate (for all lines)
             self.logger.info(f"Adding {len(line_items)} line items to order {purchase_order_number}")
 
             change_envelope = self._build_change_purchase2_envelope(
@@ -275,16 +301,11 @@ class PurchaseOrderSink(Sink):
                 f"with {len(line_items)} lines for order id {reference_for_soap}"
             )
 
+            state_updates["success"] = True
+            return purchase_order_number, status, state_updates
+
         except Exception as e:
             self.logger.error(f"Error processing record {record.get('id', 'unknown')}: {e}")
-            raise
-
-    def process_batch(self, records: list[Dict[str, Any]]) -> None:
-        """Process a batch of records.
-        
-        Args:
-            records: List of records to process
-        """
-        for record in records:
-            self.process_record(record)
-
+            state_updates["success"] = False
+            status = False
+            return purchase_order_number, status, state_updates
