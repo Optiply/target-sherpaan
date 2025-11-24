@@ -287,4 +287,3 @@ class PurchaseOrderSink(Sink):
         """
         for record in records:
             self.process_record(record)
-
