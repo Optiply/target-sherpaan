@@ -149,3 +149,15 @@ class SherpaClient:
             self.logger.error(f"Failed to parse SOAP response for {service_name}: {e}")
             return {"raw_response": xml_response}
 
+
+    def _write_state_message(self) -> None:
+        """Write out a STATE message with the latest state."""
+        tap_state = self.tap_state
+
+        if tap_state and tap_state.get("bookmarks"):
+            for stream_name in tap_state.get("bookmarks").keys():
+                # clean partitions from state only for streams with no rep key
+                if tap_state["bookmarks"][stream_name].get("partitions") and not self._tap.streams[stream_name].replication_key:
+                    tap_state["bookmarks"][stream_name]["partitions"] = []
+
+        singer.write_message(StateMessage(value=tap_state))
