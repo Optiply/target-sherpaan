@@ -64,31 +64,44 @@ class SherpaClient:
             "SOAPAction": f'"http://sherpa.sherpaan.nl/{service_name}"'
         })
 
-        url = self.auth.base_url.replace("?wsdl", "")
+        # Clean up URL - remove query params and ensure proper format
+        url = self.auth.base_url.replace("?wsdl", "").split("?")[0]
         if not url.endswith(".asmx"):
             url = f"{url}/Sherpa.asmx"
 
         try:
             self.logger.info(f"Calling {service_name} at {url}")
+            self.logger.info(f"SOAPAction header: http://sherpa.sherpaan.nl/{service_name}")
             # Log the XML being sent for debugging (truncate if too long)
             if len(soap_envelope) > 2000:
                 self.logger.debug(f"SOAP envelope (first 2000 chars): {soap_envelope[:2000]}")
             else:
                 self.logger.debug(f"SOAP envelope: {soap_envelope}")
+            
             response = self.session.post(
                 url,
                 data=soap_envelope.encode('utf-8'),
                 timeout=self.timeout
             )
+            
+            self.logger.info(f"Response status code: {response.status_code}")
+            
             if response.status_code != 200:
                 self.logger.error(f"HTTP {response.status_code} error for {service_name}")
-                self.logger.error(f"Response body: {response.text[:500]}")
+                self.logger.error(f"Response headers: {dict(response.headers)}")
+                self.logger.error(f"Response body (first 1000 chars): {response.text[:1000]}")
             response.raise_for_status()
-            return self._parse_soap_response(response.text, service_name)
+            
+            parsed_response = self._parse_soap_response(response.text, service_name)
+            self.logger.debug(f"Parsed response: {parsed_response}")
+            return parsed_response
         except Exception as e:
             self.logger.error(f"Error in call_soap_service for {service_name}: {e}")
+            self.logger.error(f"URL attempted: {url}")
             if hasattr(e, 'response') and e.response is not None:
-                self.logger.error(f"Response body: {e.response.text[:500]}")
+                self.logger.error(f"Response status: {e.response.status_code}")
+                self.logger.error(f"Response headers: {dict(e.response.headers)}")
+                self.logger.error(f"Response body (first 1000 chars): {e.response.text[:1000]}")
             raise
 
     def _parse_soap_response(
@@ -106,6 +119,7 @@ class SherpaClient:
             Parsed response dictionary
         """
         try:
+            self.logger.debug(f"Raw XML response (first 500 chars): {xml_response[:500]}")
             xml_dict = xmltodict.parse(xml_response)
             
             # Handle different SOAP namespaces
@@ -122,7 +136,10 @@ class SherpaClient:
 
             if not soap_body:
                 self.logger.warning(f"Could not find SOAP body in response for {service_name}")
+                self.logger.warning(f"Available keys in parsed XML: {list(xml_dict.keys())}")
                 return {"raw_response": xml_response}
+
+            self.logger.debug(f"SOAP body keys: {list(soap_body.keys()) if isinstance(soap_body, dict) else 'Not a dict'}")
 
             # Find the response data dynamically
             response_data = None
@@ -141,10 +158,15 @@ class SherpaClient:
                         break
 
             if response_data:
+                self.logger.debug(f"Found response data: {response_data}")
                 return response_data
 
             # Fallback: return the entire body
+            self.logger.debug(f"Returning entire SOAP body as response")
             return soap_body if isinstance(soap_body, dict) else {"raw_response": xml_response}
         except Exception as e:
             self.logger.error(f"Failed to parse SOAP response for {service_name}: {e}")
+            self.logger.error(f"XML response (first 1000 chars): {xml_response[:1000]}")
+            import traceback
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
             return {"raw_response": xml_response}

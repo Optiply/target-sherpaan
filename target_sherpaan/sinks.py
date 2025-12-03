@@ -271,14 +271,19 @@ class PurchaseOrderSink(HotglueSink):
                 soap_envelope=add_envelope
             )
 
+            self.logger.debug(f"AddOrderedPurchase response: {add_response}")
+
             # Extract purchase order number from response
             purchase_order_number = self._extract_purchase_order_number(add_response)
 
             if not purchase_order_number:
                 self.logger.error(
-                    f"Failed to extract purchase order number from response: {add_response}"
+                    f"Failed to extract purchase order number from AddOrderedPurchase response"
                 )
+                self.logger.error(f"Full response structure: {add_response}")
+                self.logger.error(f"Response type: {type(add_response)}")
                 state_updates["success"] = False
+                state_updates["error"] = f"Could not extract purchase order number from response: {add_response}"
                 status = False
                 return None, status, state_updates
 
@@ -305,7 +310,10 @@ class PurchaseOrderSink(HotglueSink):
             return purchase_order_number, status, state_updates
 
         except Exception as e:
+            import traceback
             self.logger.error(f"Error processing record {record.get('id', 'unknown')}: {e}")
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
             state_updates["success"] = False
+            state_updates["error"] = str(e)
             status = False
             return purchase_order_number, status, state_updates
