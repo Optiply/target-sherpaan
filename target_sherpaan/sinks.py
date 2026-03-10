@@ -107,14 +107,16 @@ class PurchaseOrderSink(HotglueSink):
         self,
         supplier_code: str,
         reference: str,
-        warehouse_code: str
+        warehouse_code: str,
+        external_order_number: str = ""
     ) -> str:
-        """Build SOAP envelope for AddOrderedPurchase.
+        """Build SOAP envelope for AddOrderedPurchaseWithExternalOrderNumber.
 
         Args:
             supplier_code: Supplier code
             reference: Reference for the purchase order
             warehouse_code: Warehouse code
+            external_order_number: External order number for cross-system traceability
 
         Returns:
             SOAP envelope XML string
@@ -123,12 +125,13 @@ class PurchaseOrderSink(HotglueSink):
         return f"""<?xml version="1.0" encoding="utf-8"?>
 <soap12:Envelope xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:soap12="http://www.w3.org/2003/05/soap-envelope">
   <soap12:Body>
-    <AddOrderedPurchase xmlns="http://sherpa.sherpaan.nl/">
+    <AddOrderedPurchaseWithExternalOrderNumber xmlns="http://sherpa.sherpaan.nl/">
       <securityCode>{escape(str(security_code))}</securityCode>
       <supplierCode>{escape(str(supplier_code))}</supplierCode>
-      <reference>{escape(str(reference))}</reference>
       <warehouseCode>{escape(str(warehouse_code))}</warehouseCode>
-    </AddOrderedPurchase>
+      <reference>{escape(str(reference))}</reference>
+      <externalOrderNumber>{escape(str(external_order_number))}</externalOrderNumber>
+    </AddOrderedPurchaseWithExternalOrderNumber>
   </soap12:Body>
 </soap12:Envelope>"""
 
@@ -260,25 +263,28 @@ class PurchaseOrderSink(HotglueSink):
 
             self.logger.info(f"Creating purchase order with id: {reference_for_soap}")
 
+            external_order_number = record.get("externalid", reference_for_soap)
+
             add_envelope = self._build_add_ordered_purchase_envelope(
                 supplier_code=supplier_code_for_soap,
                 reference=reference_for_soap,
-                warehouse_code=warehouse_code_for_soap
+                warehouse_code=warehouse_code_for_soap,
+                external_order_number=external_order_number
             )
 
             add_response = self.client.call_soap_service(
-                service_name="AddOrderedPurchase",
+                service_name="AddOrderedPurchaseWithExternalOrderNumber",
                 soap_envelope=add_envelope
             )
 
-            self.logger.debug(f"AddOrderedPurchase response: {add_response}")
+            self.logger.debug(f"AddOrderedPurchaseWithExternalOrderNumber response: {add_response}")
 
             # Extract purchase order number from response
             purchase_order_number = self._extract_purchase_order_number(add_response)
 
             if not purchase_order_number:
                 self.logger.error(
-                    f"Failed to extract purchase order number from AddOrderedPurchase response"
+                    f"Failed to extract purchase order number from AddOrderedPurchaseWithExternalOrderNumber response"
                 )
                 self.logger.error(f"Full response structure: {add_response}")
                 self.logger.error(f"Response type: {type(add_response)}")
