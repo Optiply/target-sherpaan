@@ -31,6 +31,7 @@ class PurchaseOrderSink(HotglueSink):
         th.Property("externalid", th.StringType),
         th.Property("line_items", th.ArrayType(
             th.ObjectType(
+                th.Property("id", th.IntegerType, required=True),
                 th.Property("product_remoteId", th.StringType, required=True),
                 th.Property("supplier_item_code", th.StringType),
                 th.Property("quantity", th.NumberType, required=True),
@@ -277,6 +278,11 @@ class PurchaseOrderSink(HotglueSink):
                 status = False
                 return None, status, state_updates
 
+            try:
+                line_items.sort(key=lambda line: int(line["id"]))
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError("Each line item must have a numeric id") from error
+
             self.logger.info(f"Creating purchase order with id: {reference_for_soap}")
 
             add_envelope = self._build_add_ordered_purchase_envelope(
@@ -309,46 +315,61 @@ class PurchaseOrderSink(HotglueSink):
             self.logger.info(f"Created purchase order {purchase_order_number} for order id {reference_for_soap}")
             self.logger.info(f"Adding {len(line_items)} line items to order {purchase_order_number}")
 
-            change_envelope = self._build_change_purchase2_envelope(
-                purchase_order_number=purchase_order_number,
-                line_items=line_items,
-                created_at=created_at
-            )
+            chunk_size = 100
+            chunks = [line_items[index:index + chunk_size] for index in range(0, len(line_items), chunk_size)]
+            sent_line_count = 0
 
-            # Retry loop: if Sherpa reports an unknown item code, drop that line and retry
-            max_item_retries = len(line_items)
-            for attempt in range(max_item_retries + 1):
-                try:
-                    change_response = self.client.call_soap_service(
-                        service_name="ChangePurchase2",
-                        soap_envelope=change_envelope
+            for chunk_number, chunk in enumerate(chunks, start=1):
+                self.logger.info(
+                    f"Sending ChangePurchase2 chunk {chunk_number}/{len(chunks)} ({len(chunk)} lines)"
+                )
+
+                # If Sherpa reports an unknown item code, remove it only from this chunk and retry.
+                max_item_retries = len(chunk)
+                for attempt in range(max_item_retries + 1):
+                    change_envelope = self._build_change_purchase2_envelope(
+                        purchase_order_number=purchase_order_number,
+                        line_items=chunk,
+                        created_at=created_at
                     )
-                    break  # success, exit retry loop
-                except Exception as change_err:
-                    from tenacity import RetryError
-                    actual = change_err.last_attempt.exception() if isinstance(change_err, RetryError) else change_err
-                    error_str = str(actual)
-                    unknown_match = re.search(r"Unknown item code (\S+)", error_str)
-                    if unknown_match and attempt < max_item_retries:
+                    try:
+                        self.client.call_soap_service(
+                            service_name="ChangePurchase2",
+                            soap_envelope=change_envelope
+                        )
+                        break
+                    except Exception as change_err:
+                        from tenacity import RetryError
+                        actual = change_err.last_attempt.exception() if isinstance(change_err, RetryError) else change_err
+                        unknown_match = re.search(r"Unknown item code (\S+)", str(actual))
+                        if not unknown_match or attempt >= max_item_retries:
+                            raise
+
                         bad_code = unknown_match.group(1)
                         self.logger.warning(
-                            f"Removing unknown item code '{bad_code}' from order {purchase_order_number} and retrying"
+                            f"Removing unknown item code '{bad_code}' from chunk "
+                            f"{chunk_number}/{len(chunks)} and retrying"
                         )
-                        line_items = [l for l in line_items if str(l.get("product_remoteId", "")) != bad_code]
-                        if not line_items:
-                            self.logger.error(f"All line items removed for order {purchase_order_number}, skipping ChangePurchase2")
+                        remaining_lines = [
+                            line for line in chunk
+                            if str(line.get("product_remoteId", "")) != bad_code
+                        ]
+                        if len(remaining_lines) == len(chunk):
+                            raise
+                        if not remaining_lines:
+                            self.logger.warning(
+                                f"All line items were removed from chunk "
+                                f"{chunk_number}/{len(chunks)}, skipping chunk"
+                            )
+                            chunk = []
                             break
-                        change_envelope = self._build_change_purchase2_envelope(
-                            purchase_order_number=purchase_order_number,
-                            line_items=line_items,
-                            created_at=created_at
-                        )
-                    else:
-                        raise
+                        chunk = remaining_lines
+
+                sent_line_count += len(chunk)
 
             self.logger.info(
                 f"Successfully processed purchase order {purchase_order_number} "
-                f"with {len(line_items)} lines for order id {reference_for_soap}"
+                f"with {sent_line_count} lines for order id {reference_for_soap}"
             )
 
             state_updates["success"] = True
